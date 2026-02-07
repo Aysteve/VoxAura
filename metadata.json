@@ -1,0 +1,8 @@
+{
+  "name": "VoxAura - Next-Gen Expressive TTS",
+  "description": "A cutting-edge Text-to-Speech platform featuring hyper-realistic voices, ultra-low latency streaming, and an interactive full-duplex live mode powered by Gemini.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
