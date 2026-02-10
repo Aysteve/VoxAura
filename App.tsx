@@ -1,15 +1,16 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { VOICES, EMOTIONS, MUSIC_TAGS, VOICE_DESIGN_CASES } from './constants';
+import { VOICES, EMOTIONS, MUSIC_TAGS, VOICE_DESIGN_CASES, ENHANCE_PRESETS } from './constants';
 import { VoiceCard } from './components/VoiceCard';
 import { AudioPlayer } from './components/AudioPlayer';
 import { LiveLab } from './components/LiveLab';
 import { ProfileDashboard } from './components/ProfileDashboard';
 import { VoiceCloneModal } from './components/VoiceCloneModal';
-import { generateTTS, generateMusic, generateLyrics, generateMultiSpeakerTTS } from './services/geminiService';
+import { generateTTS, generateMusic, generateLyrics, generateMultiSpeakerTTS, generateVoiceChange, enhanceSpeech } from './services/geminiService';
+import { audioFileToWavBase64 } from './services/audioUtils';
 import { TTSGeneration, VoiceProfile, MusicProductionParams, MultiSpeakerTurn } from './types';
 
-type TabType = 'home' | 'speech' | 'music' | 'library' | 'design' | 'resonance' | 'profile';
+type TabType = 'home' | 'speech' | 'music' | 'library' | 'design' | 'resonance' | 'profile' | 'changer' | 'enhance';
 
 const App: React.FC = () => {
   const [hasKey, setHasKey] = useState<boolean | null>(null);
@@ -49,6 +50,26 @@ const App: React.FC = () => {
   const [designName, setDesignName] = useState('');
   const [speed, setSpeed] = useState(1.0);
   const [pitch, setPitch] = useState(0);
+
+  const [uploadedAudioFile, setUploadedAudioFile] = useState<File | null>(null);
+  const [uploadedAudioBase64, setUploadedAudioBase64] = useState<string>('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedAudioUrl, setRecordedAudioUrl] = useState<string>('');
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [removeBackgroundNoise, setRemoveBackgroundNoise] = useState(true);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [estimatedCost, setEstimatedCost] = useState(0);
+
+  // Enhance states
+  const [enhancePreset, setEnhancePreset] = useState(ENHANCE_PRESETS[0]);
+  const [enhanceAudioFile, setEnhanceAudioFile] = useState<File | null>(null);
+  const [enhanceAudioBase64, setEnhanceAudioBase64] = useState<string>('');
+  const [enhanceAudioUrl, setEnhanceAudioUrl] = useState<string>('');
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const recordingStartTimeRef = useRef<number>(0);
+  const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const [isSidebarHovered, setIsSidebarHovered] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -139,12 +160,37 @@ const App: React.FC = () => {
         type = 'design';
         entryText = `Persona: ${designName}`;
       } else {
+        // Generate enhanced persona description from voice profile
+        let personaFromVoice = `${selectedVoice.gender} ${selectedVoice.age} ${selectedVoice.accent} speaker with ${selectedVoice.description.toLowerCase()}`;
+        
+        // Add specific accent characteristics for better customization
+        const accentEnhancements: { [key: string]: string } = {
+          'Nigeria': 'with authentic West African phonetic patterns, melodic intonation, and warm Nigerian English pronunciation including rolled R sounds and expressive vowel lengthening',
+          'Kenya': 'with genuine East African speech patterns, vibrant Kenyan English rhythm, and energetic pronunciation with distinct consonant emphasis',
+          'South Africa': 'with authentic Southern African speech cadence, thoughtful pauses, and rich South African English with Afrikaans-influenced intonation',
+          'Ghana': 'with true Central African resonance, storytelling flair, and Ghanaian English with melodic rises and falls typical of Akan-influenced speech',
+          'Morocco': 'with genuine North African lilt, artistic expression, and Moroccan-accented English with distinctive vowel sounds and rhythmic flow',
+          'Tanzania': 'with smooth East African flow, gentle Tanzanian English rhythm, and warm Swahili-influenced pronunciation with soft consonants',
+          'Uganda': 'with authoritative East African presence, commanding Ugandan English delivery, and strong consonant pronunciation with confident tone',
+          'India': 'with melodic South Asian intonation, warm hospitality, and Indian English pronunciation with soft consonants and musical cadence',
+          'Japan': 'with precise East Asian articulation, calm demeanor, and Japanese-accented English with clear consonants and measured pace',
+          'UK': 'with proper British Received Pronunciation, elegant formality, and classic English intonation with crisp consonants',
+          'Ireland': 'with lyrical Celtic charm, expressive storytelling, and Irish English with musical lilt and warm vowel sounds',
+          'Canada': 'with friendly North American warmth, clear articulation, and Canadian English with rising intonation and polite tone'
+        };
+        
+        if (accentEnhancements[selectedVoice.accent]) {
+          personaFromVoice += `, ${accentEnhancements[selectedVoice.accent]}`;
+        }
+        
+        const finalPersona = customPersona ? `${personaFromVoice}. ${customPersona}` : personaFromVoice;
+        
         const result = await generateTTS(
           inputText, 
           selectedVoice.id, 
           selectedEmotion, 
           `Speed: ${speed}x`,
-          customPersona || undefined
+          finalPersona
         );
         audioUrl = result.audioUrl;
         type = 'tts';
@@ -225,6 +271,103 @@ const App: React.FC = () => {
     setSelectedTags(new Set());
   };
 
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      recordedChunksRef.current = [];
+      recordingStartTimeRef.current = Date.now();
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordedChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(recordedChunksRef.current, { type: 'audio/wav' });
+        const audioUrl = URL.createObjectURL(blob);
+        setRecordedAudioUrl(audioUrl);
+        
+        // Calculate duration
+        const audio = new Audio(audioUrl);
+        audio.onloadedmetadata = () => {
+          setAudioDuration(audio.duration);
+          setEstimatedCost(Math.ceil(audio.duration / 60) * 1000); // 1000 characters per minute
+        };
+
+        // Convert to base64 for processing
+        const base64 = await audioFileToWavBase64(new File([blob], 'recording.wav', { type: 'audio/wav' }));
+        setUploadedAudioBase64(base64);
+        
+        // Stop all tracks
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      
+      // Update recording duration
+      recordingIntervalRef.current = setInterval(() => {
+        setRecordingDuration(Math.floor((Date.now() - recordingStartTimeRef.current) / 1000));
+      }, 1000);
+
+    } catch (err) {
+      setError('Failed to access microphone');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      if (recordingIntervalRef.current) {
+        clearInterval(recordingIntervalRef.current);
+      }
+    }
+  };
+
+  const handleAudioFileSelect = async (file: File) => {
+    if (file.size > 50 * 1024 * 1024) { // 50MB limit
+      setError('File size must be less than 50MB');
+      return;
+    }
+
+    setUploadedAudioFile(file);
+    setRecordedAudioUrl(''); // Clear recorded audio if file is selected
+    
+    try {
+      const base64 = await audioFileToWavBase64(file);
+      setUploadedAudioBase64(base64);
+      
+      // Calculate duration for cost estimation
+      const audio = new Audio(URL.createObjectURL(file));
+      audio.onloadedmetadata = () => {
+        setAudioDuration(audio.duration);
+        setEstimatedCost(Math.ceil(audio.duration / 60) * 1000);
+      };
+    } catch (err) {
+      setError('Failed to process audio file');
+    }
+  };
+
+  const handleEnhanceFileSelect = async (file: File) => {
+    if (file.size > 50 * 1024 * 1024) { // 50MB limit
+      setError('File size must be less than 50MB');
+      return;
+    }
+
+    setEnhanceAudioFile(file);
+    
+    try {
+      const base64 = await audioFileToWavBase64(file);
+      setEnhanceAudioBase64(base64);
+    } catch (err) {
+      setError('Failed to process audio file');
+    }
+  };
+
   return (
     <div className="flex h-screen bg-studio-cream text-studio-brown overflow-hidden font-sans">
       <audio ref={previewAudioRef} className="hidden" />
@@ -265,7 +408,9 @@ const App: React.FC = () => {
           <SidebarItem id="speech" label="Speech" icon="🗣️" />
           <SidebarItem id="music" label="Music" icon="🎵" />
           <SidebarItem id="resonance" label="Live" icon="🌊" />
-          <SidebarItem id="design" label="Design" icon="✨" />
+          <SidebarItem id="changer" label="Changer" icon="🔄" />
+          <SidebarItem id="enhance" label="Enhance" icon="✨" />
+          <SidebarItem id="design" label="Design" icon="🎨" />
           <SidebarItem id="library" label="Library" icon="📚" />
           <SidebarItem id="profile" label="Profile" icon="👤" />
         </nav>
@@ -465,7 +610,7 @@ const App: React.FC = () => {
                  <h1 className="text-5xl md:text-8xl font-black tracking-tighter text-studio-brown uppercase italic leading-[0.85]">Vox<span className="text-studio-orange">Aura</span></h1>
                  <p className="text-[10px] md:text-xs font-black uppercase tracking-[0.4em] text-studio-brown/30">Next-Gen Neural Audio Lab</p>
                </div>
-               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-2xl mx-auto">
+               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 max-w-4xl mx-auto">
                   <div onClick={() => setActiveTab('speech')} className="bg-white border border-studio-peach rounded-3xl p-6 cursor-pointer group hover:shadow-lg transition-all">
                      <div className="text-3xl mb-3">🎙️</div>
                      <h3 className="text-sm font-black uppercase italic">Speech Lab</h3>
@@ -476,11 +621,254 @@ const App: React.FC = () => {
                      <h3 className="text-sm font-black uppercase italic">Music Engine</h3>
                      <p className="text-[10px] text-studio-brown/50">Compose neural melodies.</p>
                   </div>
+                  <div onClick={() => setActiveTab('changer')} className="bg-white border border-studio-peach rounded-3xl p-6 cursor-pointer group hover:shadow-lg transition-all">
+                     <div className="text-3xl mb-3">🔄</div>
+                     <h3 className="text-sm font-black uppercase italic">Voice Changer</h3>
+                     <p className="text-[10px] text-studio-brown/50">Transform voices with emotion.</p>
+                  </div>
+                  <div onClick={() => setActiveTab('enhance')} className="bg-white border border-studio-peach rounded-3xl p-6 cursor-pointer group hover:shadow-lg transition-all">
+                     <div className="text-3xl mb-3">✨</div>
+                     <h3 className="text-sm font-black uppercase italic">Enhance Speech</h3>
+                     <p className="text-[10px] text-studio-brown/50">Clean up audio recordings.</p>
+                  </div>
                </div>
             </div>
           )}
 
           {activeTab === 'resonance' && <LiveLab />}
+          {activeTab === 'changer' && (
+            <div className="max-w-4xl mx-auto space-y-6 animate-slide">
+               <div className="text-center space-y-2">
+                  <h1 className="text-2xl font-black uppercase italic">Voice Changer</h1>
+                  <p className="text-sm text-studio-brown/60">Transform voices while preserving emotion and delivery</p>
+               </div>
+
+               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Audio Input Section */}
+                  <div className="space-y-4">
+                     <h2 className="text-lg font-bold uppercase">Audio Input</h2>
+                     
+                     {/* Upload/Record Box */}
+                     <div className="bg-white border-2 border-dashed border-studio-peach rounded-2xl p-8 text-center space-y-4">
+                        {!uploadedAudioFile && !recordedAudioUrl ? (
+                          <>
+                            <div className="text-6xl">🎤</div>
+                            <div className="space-y-2">
+                              <p className="text-sm font-medium">Upload audio file or record live</p>
+                              <p className="text-xs text-studio-brown/50">MP3, WAV, M4A • Max 50MB • Max 5 minutes</p>
+                            </div>
+                            
+                            <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                              <label className="bg-studio-cream border border-studio-peach px-4 py-2 rounded-xl text-sm font-bold uppercase cursor-pointer hover:bg-studio-peach/10 transition-all">
+                                <input 
+                                  type="file" 
+                                  accept="audio/*" 
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (file) handleAudioFileSelect(file);
+                                  }}
+                                />
+                                Upload File
+                              </label>
+                              
+                              <button 
+                                onClick={startRecording}
+                                disabled={isRecording}
+                                className="bg-studio-brown text-white px-4 py-2 rounded-xl text-sm font-bold uppercase disabled:opacity-50 flex items-center gap-2"
+                              >
+                                <span>🎙️</span> Record Live
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="space-y-4">
+                            {recordedAudioUrl && (
+                              <div className="space-y-2">
+                                <p className="text-sm font-medium">Recording Complete</p>
+                                <audio controls className="w-full" src={recordedAudioUrl} />
+                                <p className="text-xs text-studio-brown/50">
+                                  Duration: {Math.floor(audioDuration)}s • Cost: {estimatedCost} characters
+                                </p>
+                              </div>
+                            )}
+                            
+                            {uploadedAudioFile && !recordedAudioUrl && (
+                              <div className="space-y-2">
+                                <p className="text-sm font-medium">File Selected: {uploadedAudioFile.name}</p>
+                                <p className="text-xs text-studio-brown/50">
+                                  Size: {(uploadedAudioFile.size / 1024 / 1024).toFixed(1)}MB • 
+                                  Duration: {Math.floor(audioDuration)}s • 
+                                  Cost: {estimatedCost} characters
+                                </p>
+                              </div>
+                            )}
+                            
+                            <button 
+                              onClick={() => {
+                                setUploadedAudioFile(null);
+                                setRecordedAudioUrl('');
+                                setUploadedAudioBase64('');
+                                setAudioDuration(0);
+                                setEstimatedCost(0);
+                              }}
+                              className="text-xs text-studio-orange hover:underline"
+                            >
+                              Clear and upload different audio
+                            </button>
+                          </div>
+                        )}
+                        
+                        {/* Recording Controls */}
+                        {isRecording && (
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-center gap-2">
+                              <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                              <span className="text-sm font-medium">Recording... {recordingDuration}s</span>
+                            </div>
+                            <button 
+                              onClick={stopRecording}
+                              className="bg-red-500 text-white px-6 py-2 rounded-xl text-sm font-bold uppercase"
+                            >
+                              Stop Recording
+                            </button>
+                          </div>
+                        )}
+                     </div>
+                  </div>
+
+                  {/* Settings Section */}
+                  <div className="space-y-4">
+                     <h2 className="text-lg font-bold uppercase">Settings</h2>
+                     
+                     <div className="bg-white border border-studio-peach rounded-2xl p-6 space-y-6">
+                        {/* Voice Selection */}
+                        <div className="space-y-2">
+                           <label className="text-sm font-bold uppercase">Target Voice</label>
+                           <select 
+                             value={selectedVoice.id} 
+                             onChange={(e) => {
+                               const voice = VOICES.find(v => v.id === e.target.value);
+                               if (voice) setSelectedVoice(voice);
+                             }}
+                             className="w-full bg-studio-cream border border-studio-peach rounded-xl p-3 text-sm"
+                           >
+                             {VOICES.map(voice => (
+                               <option key={voice.id} value={voice.id}>
+                                 {voice.name} ({voice.accent}) - {voice.description}
+                               </option>
+                             ))}
+                           </select>
+                        </div>
+
+                        {/* Emotion Selection */}
+                        <div className="space-y-2">
+                           <label className="text-sm font-bold uppercase">Emotion</label>
+                           <select 
+                             value={selectedEmotion} 
+                             onChange={(e) => setSelectedEmotion(e.target.value)}
+                             className="w-full bg-studio-cream border border-studio-peach rounded-xl p-3 text-sm"
+                           >
+                             {EMOTIONS.map(emotion => (
+                               <option key={emotion} value={emotion}>{emotion}</option>
+                             ))}
+                           </select>
+                        </div>
+
+                        {/* Background Noise Removal */}
+                        <div className="flex items-center justify-between">
+                           <div>
+                              <label className="text-sm font-bold uppercase">Remove Background Noise</label>
+                              <p className="text-xs text-studio-brown/60">Automatically clean audio</p>
+                           </div>
+                           <button
+                             onClick={() => setRemoveBackgroundNoise(!removeBackgroundNoise)}
+                             className={`w-12 h-6 rounded-full transition-all ${
+                               removeBackgroundNoise ? 'bg-studio-brown' : 'bg-studio-cream border border-studio-peach'
+                             }`}
+                           >
+                             <div className={`w-5 h-5 rounded-full bg-white transition-all ${
+                               removeBackgroundNoise ? 'translate-x-6' : 'translate-x-0.5'
+                             }`}></div>
+                           </button>
+                        </div>
+
+                        {/* Language Support Info */}
+                        <div className="bg-studio-cream rounded-xl p-4">
+                           <h3 className="text-sm font-bold uppercase mb-2">Supported Languages</h3>
+                           <p className="text-xs text-studio-brown/70">
+                             English, Japanese, Chinese, German, Hindi, French, Korean, Portuguese, Italian, Spanish, 
+                             Indonesian, Dutch, Turkish, Filipino, Polish, Swedish, Bulgarian, Romanian, Arabic, Czech, 
+                             Greek, Finnish, Croatian, Malay, Slovak, Danish, Tamil, Ukrainian, Russian
+                           </p>
+                        </div>
+                     </div>
+                  </div>
+               </div>
+
+               {/* Generate Button */}
+               <div className="text-center space-y-4">
+                  <button 
+                    onClick={async () => {
+                      if (!uploadedAudioBase64) {
+                        setError('Please upload audio or record first');
+                        return;
+                      }
+                      setIsGenerating(true);
+                      try {
+                        const result = await generateVoiceChange(uploadedAudioBase64, selectedVoice.id, selectedEmotion, removeBackgroundNoise);
+                        const newEntry: TTSGeneration = {
+                          id: Math.random().toString(36).substr(2, 5),
+                          text: 'Voice changed audio',
+                          voice: selectedVoice.id,
+                          voiceName: selectedVoice.name,
+                          emotion: selectedEmotion,
+                          timestamp: Date.now(),
+                          audioUrl: result.audioUrl,
+                          type: 'voice_change',
+                        };
+                        setHistory(prev => [newEntry, ...prev]);
+                        setRightPanelTab('history');
+                        if (window.innerWidth > 768) setIsRightPanelOpen(true);
+                      } catch (err: any) {
+                        setError(err.message || 'Voice change failed');
+                      } finally {
+                        setIsGenerating(false);
+                      }
+                    }}
+                    disabled={isGenerating || !uploadedAudioBase64}
+                    className="bg-studio-brown text-white px-8 py-4 rounded-xl font-black text-lg uppercase shadow-md disabled:opacity-50"
+                  >
+                    {isGenerating ? 'Transforming Voice...' : 'Generate Voice Change'}
+                  </button>
+                  
+                  {estimatedCost > 0 && (
+                    <p className="text-sm text-studio-brown/60">
+                      Estimated cost: {estimatedCost} characters
+                    </p>
+                  )}
+               </div>
+
+               {/* Best Practices */}
+               <div className="bg-white border border-studio-peach rounded-2xl p-6">
+                  <h3 className="text-lg font-bold uppercase mb-4">Best Practices</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                     <div>
+                        <h4 className="font-bold uppercase mb-2">Expression</h4>
+                        <p className="text-studio-brown/70">Be expressive in recordings. Voice changer accurately replicates shouting, crying, laughing, and other emotions.</p>
+                     </div>
+                     <div>
+                        <h4 className="font-bold uppercase mb-2">Microphone Gain</h4>
+                        <p className="text-studio-brown/70">Ensure appropriate input gain. Quiet recordings hinder AI recognition, loud ones cause clipping.</p>
+                     </div>
+                     <div>
+                        <h4 className="font-bold uppercase mb-2">Background Noise</h4>
+                        <p className="text-studio-brown/70">Enable background noise removal for cleaner results. Clear input = better output quality.</p>
+                     </div>
+                  </div>
+               </div>
+            </div>
+          )}
           {activeTab === 'profile' && <ProfileDashboard />}
           {activeTab === 'design' && (
             <div className="max-w-2xl mx-auto space-y-6 animate-slide">
@@ -493,7 +881,153 @@ const App: React.FC = () => {
             </div>
           )}
 
-          {activeTab === 'music' && (
+          {activeTab === 'enhance' && (
+            <div className="max-w-4xl mx-auto space-y-6 animate-slide">
+               <div className="text-center space-y-2">
+                  <h1 className="text-2xl font-black uppercase italic">Enhance Speech</h1>
+                  <p className="text-sm text-studio-brown/60">Clean up and enhance your audio recordings</p>
+               </div>
+
+               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Audio Input Section */}
+                  <div className="space-y-4">
+                     <h2 className="text-lg font-bold uppercase">Audio Input</h2>
+                     
+                     {/* Upload/Record Box */}
+                     <div className="bg-white border-2 border-dashed border-studio-peach rounded-2xl p-8 text-center space-y-4">
+                        {!enhanceAudioFile ? (
+                          <>
+                            <div className="text-6xl">🎙️</div>
+                            <div className="space-y-2">
+                              <p className="text-sm font-medium">Upload audio file to enhance</p>
+                              <p className="text-xs text-studio-brown/50">MP3, WAV, M4A • Max 50MB • Max 5 minutes</p>
+                            </div>
+                            
+                            <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                              <label className="bg-studio-cream border border-studio-peach px-4 py-2 rounded-xl text-sm font-bold uppercase cursor-pointer hover:bg-studio-peach/10 transition-all">
+                                <input 
+                                  type="file" 
+                                  accept="audio/*" 
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (file) handleEnhanceFileSelect(file);
+                                  }}
+                                />
+                                Upload File
+                              </label>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="space-y-4">
+                            <div className="space-y-2">
+                              <p className="text-sm font-medium">File Selected: {enhanceAudioFile.name}</p>
+                              <p className="text-xs text-studio-brown/50">
+                                Size: {(enhanceAudioFile.size / 1024 / 1024).toFixed(1)}MB
+                              </p>
+                            </div>
+                            
+                            <button 
+                              onClick={() => {
+                                setEnhanceAudioFile(null);
+                                setEnhanceAudioBase64('');
+                                setEnhanceAudioUrl('');
+                              }}
+                              className="text-xs text-studio-orange hover:underline"
+                            >
+                              Clear and upload different audio
+                            </button>
+                          </div>
+                        )}
+                     </div>
+                  </div>
+
+                  {/* Settings Section */}
+                  <div className="space-y-4">
+                     <h2 className="text-lg font-bold uppercase">Enhancement Preset</h2>
+                     
+                     <div className="bg-white border border-studio-peach rounded-2xl p-6 space-y-6">
+                        {/* Preset Selection */}
+                        <div className="space-y-2">
+                           <label className="text-sm font-bold uppercase">Preset</label>
+                           <select 
+                             value={enhancePreset.name} 
+                             onChange={(e) => {
+                               const preset = ENHANCE_PRESETS.find(p => p.name === e.target.value);
+                               if (preset) setEnhancePreset(preset);
+                             }}
+                             className="w-full bg-studio-cream border border-studio-peach rounded-xl p-3 text-sm"
+                           >
+                             {ENHANCE_PRESETS.map(preset => (
+                               <option key={preset.name} value={preset.name}>
+                                 {preset.name}
+                               </option>
+                             ))}
+                           </select>
+                           <p className="text-xs text-studio-brown/60">{enhancePreset.description}</p>
+                        </div>
+
+                        {/* Preset Details */}
+                        <div className="bg-studio-cream rounded-xl p-4 space-y-2">
+                           <h3 className="text-sm font-bold uppercase">Settings</h3>
+                           <div className="space-y-1 text-xs">
+                             <div className="flex justify-between">
+                               <span>Noise Reduction:</span>
+                               <span>{Math.round(enhancePreset.settings.noiseReduction * 100)}%</span>
+                             </div>
+                             <div className="flex justify-between">
+                               <span>Clarity:</span>
+                               <span>{Math.round(enhancePreset.settings.clarity * 100)}%</span>
+                             </div>
+                             <div className="flex justify-between">
+                               <span>Compression:</span>
+                               <span>{Math.round(enhancePreset.settings.compression * 100)}%</span>
+                             </div>
+                           </div>
+                        </div>
+                     </div>
+                  </div>
+               </div>
+
+               {/* Generate Button */}
+               <div className="text-center space-y-4">
+                  <button 
+                    onClick={async () => {
+                      if (!enhanceAudioBase64) {
+                        setError('Please upload audio first');
+                        return;
+                      }
+                      setIsGenerating(true);
+                      try {
+                        const result = await enhanceSpeech(enhanceAudioBase64, enhancePreset.settings);
+                        const newEntry: TTSGeneration = {
+                          id: Math.random().toString(36).substr(2, 5),
+                          text: 'Enhanced speech audio',
+                          voice: 'enhance',
+                          voiceName: enhancePreset.name,
+                          emotion: 'Enhanced',
+                          timestamp: Date.now(),
+                          audioUrl: result.audioUrl,
+                          type: 'voice_change',
+                        };
+                        setHistory(prev => [newEntry, ...prev]);
+                        setError(null);
+                      } catch (err: any) {
+                        setError(err.message);
+                      } finally {
+                        setIsGenerating(false);
+                      }
+                    }}
+                    disabled={isGenerating || !enhanceAudioBase64}
+                    className="bg-studio-brown text-white px-8 py-3 rounded-xl text-sm font-bold uppercase disabled:opacity-50"
+                  >
+                    {isGenerating ? 'Enhancing...' : 'Enhance Speech'}
+                  </button>
+               </div>
+            </div>
+          )}
+
+          {activeTab === 'design' && (
             <div className="max-w-4xl mx-auto space-y-4 animate-slide">
                <h1 className="text-xl font-black uppercase italic">Music Engine</h1>
                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

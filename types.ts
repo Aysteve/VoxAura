@@ -69,6 +69,16 @@ export interface MultiSpeakerTurn {
   text: string;
 }
 
+export interface EnhancePreset {
+  name: string;
+  description: string;
+  settings: {
+    noiseReduction: number;
+    clarity: number;
+    compression: number;
+  };
+}
+
 export interface TTSGeneration {
   id: string;
   text: string;
@@ -77,7 +87,7 @@ export interface TTSGeneration {
   timestamp: number;
   audioUrl?: string;
   emotion: string;
-  type: 'tts' | 'music' | 'design' | 'dialogue';
+  type: 'tts' | 'music' | 'design' | 'dialogue' | 'voice_change';
   isFavorite?: boolean;
   speed?: number;
   pitch?: number;

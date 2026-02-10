@@ -49,6 +49,32 @@ export async function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+export async function audioFileToWavBase64(file: File): Promise<string> {
+  const audioContext = new AudioContext();
+  const arrayBuffer = await file.arrayBuffer();
+  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+  
+  // Convert to mono if stereo
+  const numChannels = audioBuffer.numberOfChannels;
+  const length = audioBuffer.length;
+  const sampleRate = audioBuffer.sampleRate;
+  
+  // Create a buffer for the PCM data
+  const pcmData = new Int16Array(length);
+  
+  // Mix channels if necessary
+  for (let i = 0; i < length; i++) {
+    let sum = 0;
+    for (let channel = 0; channel < numChannels; channel++) {
+      sum += audioBuffer.getChannelData(channel)[i];
+    }
+    pcmData[i] = Math.max(-32768, Math.min(32767, sum / numChannels * 32767));
+  }
+  
+  const wavBlob = createWavBlob(new Uint8Array(pcmData.buffer), sampleRate);
+  return await blobToBase64(wavBlob);
+}
+
 /**
  * Creates a WAV file Blob from raw PCM 16-bit mono data.
  */
